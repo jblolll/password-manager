@@ -840,13 +840,21 @@ class Main(DesktopMixin, QMainWindow):
         if not self.vault:
             self.toast("Plug in your stick first", "warn")
             return
-        home = core.HOME
-        key = next((home / ".ssh" / n for n in ("id_ed25519", "id_ecdsa", "id_rsa") if (home / ".ssh" / n).is_file()), None)
-        if key is None:
-            QMessageBox.information(self, core.APP_NAME, "This computer has no SSH key yet (~/.ssh/id_ed25519). Make one with:  ssh-keygen -t ed25519")
+        keys = sysinfo.ssh_keys(core.HOME)
+        if not keys:
+            QMessageBox.information(self, core.APP_NAME, "No private SSH key was found in ~/.ssh. Make one with:  ssh-keygen -t ed25519")
             return
+        key = keys[0]
+        if len(keys) > 1:                                  # more than one: ask which (a GitHub key, a server key, the usual one…)
+            names = [k.name for k in keys]
+            pick, ok = QInputDialog.getItem(self, core.APP_NAME, "Which SSH key should be saved in your vault?", names, 0, False)
+            if not ok:
+                return
+            key = keys[names.index(pick)]
         host = os.uname().nodename
         default = "desktop" if "desktop" in host.lower() else "laptop" if "laptop" in host.lower() else host
+        if key.name not in ("id_ed25519", "id_ecdsa", "id_rsa"):
+            default = f"{default} {key.name}"
         title, ok = QInputDialog.getText(self, core.APP_NAME, f"Save {key.name} from {host} as:", text=default)
         title = (title or "").strip()
         if not ok or not title:

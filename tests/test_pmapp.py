@@ -422,6 +422,24 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class SshKeys(unittest.TestCase):
+    def test_finds_every_private_key_not_just_the_default_names(self):
+        """A computer whose only key is ~/.ssh/github_ed25519 (no id_ed25519) once got "this computer has no SSH key yet"."""
+        from pmapp import sysinfo
+        home = Path(tempfile.mkdtemp())
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        for name in ("github_ed25519", "id_rsa", "recall_server"):
+            (ssh / name).write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n")
+            (ssh / (name + ".pub")).write_text("ssh-ed25519 AAAA x")
+        (ssh / "known_hosts").write_text("github.com ssh-ed25519 AAAA")
+        (ssh / "config").write_text("Host x")
+        (ssh / "authorized_keys").write_text("ssh-ed25519 AAAA")
+        (ssh / "notes.txt").write_text("not a key")
+        self.assertEqual([k.name for k in sysinfo.ssh_keys(home)], ["id_rsa", "github_ed25519", "recall_server"], "the usual one first, then the others; never .pub, known_hosts, config or other files")
+        self.assertEqual(sysinfo.ssh_keys(Path(tempfile.mkdtemp())), [])
+
+
 class LockSession(unittest.TestCase):
     """sysinfo.lock_session finds the desktop session from a background service (pretend loginctl: nothing is really locked)."""
 

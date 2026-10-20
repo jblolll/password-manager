@@ -72,6 +72,26 @@ def boot_state():
     return "off", "Not set up: you type the disk passphrase at start-up"
 
 
+def ssh_keys(home=None):
+    """This computer's private SSH keys: [Path], the usual ones first (id_ed25519, id_ecdsa, id_rsa), then any other private key in ~/.ssh."""
+    d = Path(home or Path.home()) / ".ssh"
+    usual = [d / n for n in ("id_ed25519", "id_ecdsa", "id_rsa") if (d / n).is_file()]
+    others = []
+    try:
+        for f in sorted(d.iterdir()):
+            if f in usual or not f.is_file() or f.suffix == ".pub" or f.name.startswith(("known_hosts", "authorized_keys", "config", "ssh-")) or f.stat().st_size > 20000:
+                continue
+            try:
+                with open(f, "r", errors="replace") as fh:
+                    if "PRIVATE KEY" in fh.readline():
+                        others.append(f)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return usual + others
+
+
 def wait_seconds():
     """How long sudo and the pop-ups wait for a stick that isn't in yet (install.sh --wait); 0 = they don't."""
     try:

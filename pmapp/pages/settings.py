@@ -130,7 +130,7 @@ class SettingsPage(QWidget):
         c.body.addWidget(self.imp_msg)
         c.body.addWidget(self.imp_bar)
         self.add(c, "Wi-Fi networks on this computer", "Copies the networks this computer has joined, with their passwords, into your vault so you can share them by QR code.", button("Add them…", "", w.import_wifi, "wifi"), "wifi network")
-        self.add(c, "This computer's SSH key", "Saves ~/.ssh/id_ed25519 under Servers & SSH.", button("Add key", "", w.add_this_computer_ssh, "key"), "ssh server")
+        self.add(c, "This computer's SSH key", "Saves one of the keys in ~/.ssh (it asks which, if there are several) under Servers & SSH.", button("Add key", "", w.add_this_computer_ssh, "key"), "ssh server")
         self.add(c, "Apps", "Website logins for services that also have an app are also kept under Apps, linked, so changing one changes both.", button("Copy logins into Apps", "", w.add_app_twins, "copy"), "apps twins")
 
         c = self.card("Sync", "Every computer keeps the same vault.")
