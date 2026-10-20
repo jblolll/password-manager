@@ -61,7 +61,8 @@ DEFAULTS = {"vault": str(HOME / "Documents" / "Vault" / "recall.kdbx"), "launch_
             "app_fill": True, "apps": {},
             "cross_device": False, "cross_device_vault": False,
             "lock_screen_on_pull": False, "lock_peers_on_pull": False, "audit_journal": True, "reveal_timeout_s": 30,
-            "warn_passwords": True, "warn_security": True}
+            "warn_passwords": True, "warn_security": True,
+            "show_logos": True, "codes_visible": True, "collapsed_folders": [], "passkeys_enabled": True}
 HELPER = Path(os.environ.get("JBLOL_PM_HELPER", "/usr/local/sbin/recall-stick-check"))
 PAM_FILE = Path(os.environ.get("JBLOL_PM_PAM", "/etc/pam.d/sudo"))
 MEDIA = Path(os.environ.get("JBLOL_PM_MEDIA", f"/run/media/{os.environ.get('USER', 'jblol')}"))
@@ -502,8 +503,26 @@ class Vault:
             raise VaultError(f"The {what} name can't contain “/”.")
 
     def ensure_group(self, group):
-        if group and group not in self.groups():
-            self.run("mkdir", args=(group,), stdin="\n")
+        """Make the folder, and any folders above it that are missing (the vault engine only makes one level at a time)."""
+        if not group:
+            return
+        have = set(self.groups())
+        path = ""
+        for part in group.split("/"):
+            path = f"{path}/{part}" if path else part
+            if path not in have:
+                self.run("mkdir", args=(path,), stdin="\n")
+                have.add(path)
+
+    def delete_group(self, group):
+        """Remove an EMPTY folder (it goes to the vault's recycle bin). Refuses if anything is inside it."""
+        if not group or group.split("/")[0] in HIDDEN_GROUPS:
+            raise VaultError("That folder can't be removed.")
+        if any(e["group"] == group or e["group"].startswith(group + "/") for e in self.load()):
+            raise VaultError("The folder isn't empty. Move or delete what's inside first.")
+        if any(g.startswith(group + "/") for g in self.groups()):
+            raise VaultError("The folder has folders inside it. Remove those first.")
+        self.run("rmdir", args=(group,), stdin="\n")
 
     def attachments(self, e):
         try:
@@ -677,8 +696,9 @@ class Bridge:
     """A tiny web server on 127.0.0.1 that the browser extension asks "what do you have for this site?".
     Every request needs the pairing code and must come from a browser extension (not a web page); it is refused while the vault is locked."""
 
-    def __init__(self, port, token, state, on_fill, on_capture=None):
+    def __init__(self, port, token, state, on_fill, on_capture=None, on_passkey=None):
         self.port, self.token, self.state, self.on_fill, self.on_capture = port, token, state, on_fill, on_capture
+        self.on_passkey = on_passkey          # (kind, request dict) -> answer dict; may wait for you to approve it in the app
         self.last = None                      # the most recent request: {at, code, path, host}
         self.last_n = "-"
         self.log_path = CONF_DIR / "bridge.log"
@@ -759,7 +779,21 @@ class Bridge:
                 if not hmac.compare_digest(self.headers.get("X-PM-Token", ""), bridge.token):
                     return self.send(401, {"error": "bad pairing code"}, o)
                 locked, _entries = bridge.state()
-                if urllib.parse.urlparse(self.path).path != "/capture" or not bridge.on_capture:
+                path = urllib.parse.urlparse(self.path).path
+                if path.startswith("/passkey/") and bridge.on_passkey and path.rsplit("/", 1)[1] in ("query", "create", "get"):
+                    if locked:
+                        return self.send(423, {"error": "locked"}, o)
+                    try:
+                        n = int(self.headers.get("Content-Length") or 0)
+                        if not 0 < n <= 65536:
+                            return self.send(400, {"error": "bad size"}, o)
+                        body = json.loads(self.rfile.read(n).decode("utf-8", "replace"))
+                        if not isinstance(body, dict):
+                            raise ValueError
+                    except ValueError:
+                        return self.send(400, {"error": "bad request"}, o)
+                    return self.send(200, bridge.on_passkey(path.rsplit("/", 1)[1], body), o)
+                if path != "/capture" or not bridge.on_capture:
                     return self.send(404, {"error": "not found"}, o)
                 if locked:
                     return self.send(423, {"error": "locked"}, o)
@@ -949,6 +983,7 @@ class PhoneWorker(QThread):
 class Signals(QObject):
     filled = Signal(str, int)                 # the browser asked for a site's logins
     captured = Signal(dict)                   # the browser saw a password typed into a form
+    passkey = Signal(str, dict, object)       # a website asked for a passkey (kind, request, a box the answer goes back in)
 
 
 EVENT_LOG = CONF_DIR / "events.log"

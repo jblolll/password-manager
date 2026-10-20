@@ -13,14 +13,16 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QLockFile, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QApplication, QMenu, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 import jblol_pm as core
 from . import demo as demo_data
-from . import icons, model, sysinfo, theme
+from .logos import LogoStore
+from . import icons, model, passkeys, sysinfo, theme
 from .desktop import DesktopMixin
 from .pages.audit import AuditPage
+from .pages.codes import CodesPage
 from .pages.generator import GeneratorPage
 from .pages.health import HealthPage
 from .pages.locked import LockedPage
@@ -28,16 +30,16 @@ from .pages.security import SecurityPage
 from .pages.settings import SettingsPage
 from .pages.vault import VaultPage
 from .theme import C
-from .pages.items import drop_widget
-from .widgets import Toast, button, label
+from .pages.items import FolderDialog, PasskeyPrompt, drop_widget
+from .widgets import IconButton, Toast, VScroll, button, label
 
 try:
     import presence
 except ImportError:
     presence = None
 
-PAGE_INDEX = {"locked": 0, "vault": 1, "gen": 2, "health": 3, "usb": 4, "audit": 5, "settings": 6}
-NEEDS_VAULT = {"vault", "health"}
+PAGE_INDEX = {"locked": 0, "vault": 1, "gen": 2, "health": 3, "usb": 4, "audit": 5, "settings": 6, "codes": 7}
+NEEDS_VAULT = {"vault", "health", "codes"}
 
 
 class NavButton(QPushButton):
@@ -95,7 +97,7 @@ class Main(DesktopMixin, QMainWindow):
         self.vault_real = not demo
         self.entries, self.groups, self.pending = [], [], []
         self.health = {}
-        self.page, self.f_kind, self.f_group, self.f_fav = "vault", None, None, False
+        self.page, self.f_kind, self.f_group, self.f_fav, self.f_tag = "vault", None, None, False, None
         self.manual_key = self.keyfile = self.remote_key = self.remote_from = None
         self.remote_paused = False
         self.remote_checked = 0.0
@@ -119,6 +121,8 @@ class Main(DesktopMixin, QMainWindow):
         self.sync_timer.setSingleShot(True)
         self.sync_timer.timeout.connect(self.start_sync)
 
+        self.logos = LogoStore(enabled=bool(self.s.get("show_logos", True)) and (not demo or bool(os.environ.get("JBLOL_PM_DEMO_LOGOS"))))
+        self.logos.ready.connect(self.on_logo)
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
@@ -134,13 +138,15 @@ class Main(DesktopMixin, QMainWindow):
         self.usb_page = SecurityPage(self)
         self.audit_page = AuditPage(self)
         self.settings_page = SettingsPage(self)
-        for p in (self.locked, self.vault_page, self.gen_page, self.health_page, self.usb_page, self.audit_page, self.settings_page):
+        self.codes_page = CodesPage(self)
+        for p in (self.locked, self.vault_page, self.gen_page, self.health_page, self.usb_page, self.audit_page, self.settings_page, self.codes_page):
             self.pages.addWidget(p)
         outer.addWidget(self.pages, 1)
         self.toast_w = Toast(root)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
-        self.timer.start(1500)
+        if not demo:                              # (a demo window must never look at the real stick or open the real vault)
+            self.timer.start(1500)
         QApplication.instance().installEventFilter(self)
         for key, fn in (("Ctrl+L", self.lock_now), ("Ctrl+K", self.focus_search), ("Ctrl+F", self.focus_search), ("Ctrl+N", lambda: self.new_item("login")), ("Esc", self.escape)):
             act = QAction(self)
@@ -149,6 +155,7 @@ class Main(DesktopMixin, QMainWindow):
             self.addAction(act)
         self.signals.filled.connect(lambda host, n: (self.toast(f"Browser asked for {host}: {n} login(s) offered"), self.log(f"Browser fill: {host}, {n} login(s) offered")))
         self.signals.captured.connect(self.on_capture)
+        self.signals.passkey.connect(self.on_passkey)
         self.periodic = QTimer(self)
         self.periodic.timeout.connect(lambda: self.start_sync())
         self.watchers = []
@@ -214,9 +221,16 @@ class Main(DesktopMixin, QMainWindow):
         sc.addWidget(self.st_sub)
         sl.addLayout(sc, 1)
         v.addWidget(self.status_card)
-        self.nav_box = QVBoxLayout()
+        nav_host = QWidget()
+        self.nav_box = QVBoxLayout(nav_host)
+        self.nav_box.setContentsMargins(0, 0, 4, 0)
         self.nav_box.setSpacing(2)
-        v.addLayout(self.nav_box, 1)
+        self.nav_scroll = VScroll()
+        self.nav_scroll.setWidget(nav_host)
+        v.addWidget(self.nav_scroll, 1)
+        self.pin_box = QVBoxLayout()
+        self.pin_box.setSpacing(2)
+        v.addLayout(self.pin_box)
         self.b_lock = button("Lock vault", "primary", self.lock_now, "lock")
         self.b_lock.setFixedHeight(40)
         v.addSpacing(8)
@@ -224,51 +238,185 @@ class Main(DesktopMixin, QMainWindow):
         return side
 
     def rebuild_nav(self):
-        while self.nav_box.count():
-            it = self.nav_box.takeAt(0)
-            if it.widget():
-                drop_widget(it.widget())
+        for box in (self.nav_box, self.pin_box):
+            while box.count():
+                it = box.takeAt(0)
+                if it.widget():
+                    drop_widget(it.widget())
         self.nav = {}
         counts = {k: 0 for k in model.KINDS}
         favs = 0
+        codes = 0
         for e in self.entries:
             counts[model.kind_of(e)] += 1
             favs += bool((e.get("data") or {}).get("fav"))
+            codes += bool(e.get("otp"))
 
-        def add(key, icon, text, count=None, fn=None):
+        def add(key, icon, text, count=None, fn=None, box=None, tip=""):
             b = NavButton(icon, text, key, count)
             go = fn or (lambda k=key: self.go(k))
             b.clicked.connect(lambda _checked=False, go=go: go())      # (clicked sends a True/False that must not land in the lambda's own arguments)
+            if tip:
+                b.setToolTip(tip)
             self.nav[key] = b
-            self.nav_box.addWidget(b)
+            (box or self.nav_box).addWidget(b)
             return b
 
-        def section(text):
-            self.nav_box.addWidget(label(text, "section"))
+        def section(text, plus=None):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 4, 0)
+            row.addWidget(label(text, "section"), 1)
+            if plus:
+                row.addWidget(IconButton("plus", plus[0], 16, fn=plus[1]))
+            w = QWidget()
+            w.setLayout(row)
+            self.nav_box.addWidget(w)
         self.nav_box.addSpacing(6)
         section("VAULT")
         add("v:all", "vault", "All items", len(self.entries), lambda: self.go("vault"))
         add("v:fav", "star", "Favorites", favs, lambda: self.go("vault", fav=True))
-        for kind, icon in (("login", "key"), ("card", "card"), ("note", "note"), ("wifi", "wifi")):
+        for kind, icon in (("login", "key"), ("card", "card"), ("note", "note"), ("wifi", "wifi"), ("passkey", "passkey")):
             add("v:" + kind, icon, model.KIND_PLURAL[kind], counts[kind], lambda k=kind: self.go("vault", kind=k))
-        gcounts = {}
-        for e in self.entries:
-            if model.kind_of(e) == "login":
-                gcounts[e["group"]] = gcounts.get(e["group"], 0) + 1
-        folders = [g for g in (self.groups or core.STARTER_GROUPS) if g not in model.KIND_GROUP.values() and (gcounts.get(g) or g in core.STARTER_GROUPS)]
-        if folders:
-            section("FOLDERS")
-            for g in folders:
-                add("g:" + g, "folder", g, gcounts.get(g, 0), lambda g=g: self.go("vault", group=g))
+        section("FOLDERS", ("New folder", lambda: self.new_folder()))
+        collapsed = set(self.s.get("collapsed_folders", []))
+        hidden_by = None
+        for path, name, depth, n, has_kids in model.folder_tree(self.groups or core.STARTER_GROUPS, self.entries, core.HIDDEN_GROUPS):
+            if hidden_by and path.startswith(hidden_by + "/"):
+                continue
+            hidden_by = path if path in collapsed else None if hidden_by and not path.startswith(hidden_by + "/") else hidden_by
+            row = QHBoxLayout()
+            row.setContentsMargins(depth * 14, 0, 0, 0)
+            row.setSpacing(0)
+            if has_kids:
+                chev = IconButton("chevron_right" if path in collapsed else "chevron_down", "Show or hide the folders inside", 14, fn=lambda p=path: self.toggle_folder(p))
+                chev.setFixedSize(22, 30)
+                row.addWidget(chev)
+            else:
+                row.addSpacing(22)
+            b = NavButton("folder", name, "g:" + path, n)
+            b.clicked.connect(lambda _c=False, p=path: self.go("vault", group=p))
+            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.customContextMenuRequested.connect(lambda pos, p=path, bb=b: self.folder_menu(p, bb.mapToGlobal(pos)))
+            self.nav["g:" + path] = b
+            row.addWidget(b, 1)
+            w = QWidget()
+            w.setLayout(row)
+            self.nav_box.addWidget(w)
+        tags = model.tag_counts(self.entries)
+        if tags:
+            section("TAGS")
+            for t, n in tags[:14]:
+                b = add("t:" + t, "tag", t, n, lambda t=t: self.go("vault", tag=t))
+                b.setContextMenuPolicy(Qt.CustomContextMenu)
+                b.customContextMenuRequested.connect(lambda pos, t=t, bb=b: self.tag_menu(t, bb.mapToGlobal(pos)))
+            if len(tags) > 14:
+                self.nav_box.addWidget(label(f"  +{len(tags) - 14} more tags (search for them)", "faint"))
         section("TOOLS")
         add("gen", "dice", "Generator")
+        add("codes", "otp", "One-time codes", codes or None)
         add("health", "shield", "Security Check")
         add("usb", "usb", "USB & Security")
         add("audit", "list", "Audit log")
         self.nav_box.addStretch(1)
-        add("settings", "gear", "Settings")
+        add("settings", "gear", "Settings", box=self.pin_box)
         self.update_badges()
         self.mark_nav()
+
+    # -- folders and tags
+    def toggle_folder(self, path):
+        c = set(self.s.get("collapsed_folders", []))
+        c.symmetric_difference_update({path})
+        self.s["collapsed_folders"] = sorted(c)
+        self.save()
+        self.rebuild_nav()
+
+    def folder_menu(self, path, pos):
+        m = QMenu(self)
+        m.addAction("New folder inside…").triggered.connect(lambda: self.new_folder(path))
+        m.addAction("Delete this folder").triggered.connect(lambda: self.delete_folder(path))
+        m.exec(pos)
+
+    def new_folder(self, parent=""):
+        if not self.vault:
+            return
+        folders = [r[0] for r in model.folder_tree(self.groups or core.STARTER_GROUPS, self.entries, core.HIDDEN_GROUPS)]
+        d = FolderDialog(self, folders, parent)
+        if not d.exec():
+            return
+        path = "/".join(x for x in (d.parent(), d.name()) if x)
+        try:
+            self.vault.check_name(d.name(), "folder")
+            self.vault.ensure_group(path)
+        except core.VaultError as e:
+            QMessageBox.warning(self, "Couldn't make the folder", str(e))
+            return
+        self.log(f"Made the folder “{path}”")
+        self.groups = sorted(set(self.vault.groups()))
+        self.rebuild_nav()
+        self.go("vault", group=path)
+        self.toast(f"Folder “{path}” made", "good")
+
+    def delete_folder(self, path):
+        if QMessageBox.question(self, "Delete folder", f"Delete the empty folder “{path}”?") != QMessageBox.Yes:
+            return
+        try:
+            self.vault.delete_group(path)
+        except core.VaultError as e:
+            QMessageBox.information(self, "Can't delete it", str(e))
+            return
+        self.log(f"Deleted the folder “{path}”")
+        self.groups = sorted(set(self.vault.groups()))
+        if self.f_group == path:
+            self.f_group = None
+        self.rebuild_nav()
+        self.go("vault")
+
+    def tag_menu(self, tag, pos):
+        m = QMenu(self)
+        m.addAction("Rename this tag…").triggered.connect(lambda: self.rename_tag(tag))
+        m.addAction("Remove this tag from every item").triggered.connect(lambda: self.rename_tag(tag, remove=True))
+        m.exec(pos)
+
+    def rename_tag(self, tag, remove=False):
+        new = ""
+        if not remove:
+            new, ok = QInputDialog.getText(self, core.APP_NAME, f"Rename the tag “{tag}” to:", text=tag)
+            new = (model.norm_tags(new) or [""])[0]
+            if not ok or not new or new == tag:
+                return
+        elif QMessageBox.question(self, "Remove tag", f"Remove “{tag}” from every item that has it? The items themselves stay.") != QMessageBox.Yes:
+            return
+        todo = [e for e in self.entries if tag in model.item_tags(e)]
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            for e in todo:
+                tags = [new if t == tag else t for t in model.item_tags(e)] if new else [t for t in model.item_tags(e) if t != tag]
+                data = dict(e.get("data") or {}, tags=model.norm_tags(tags))
+                self.vault.edit(e, dict(e, data=data))
+        except core.VaultError as ex:
+            QMessageBox.warning(self, "Couldn't change the tag", str(ex))
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.log(f"Tag “{tag}” " + (f"renamed to “{new}”" if new else "removed") + f" on {len(todo)} item(s)")
+        self.f_tag = new if (self.f_tag == tag and new) else None if self.f_tag == tag else self.f_tag
+        self.reload(select=False)
+        self.go("vault", tag=self.f_tag)
+
+    def on_logo(self, host):
+        """A site's logo arrived: redraw what shows it."""
+        vp = self.vault_page
+        vp.list.viewport().update()
+        cur = vp.current
+        if cur and not vp.detail.editing and self.logos_host(cur) == host:
+            vp.show(cur)
+        if self.page == "codes":
+            self.codes_page.sig = None
+            self.codes_page.refresh()
+
+    @staticmethod
+    def logos_host(e):
+        from .logos import host_for
+        return host_for(e)
 
     def update_badges(self):
         b = self.nav.get("health")
@@ -278,18 +426,21 @@ class Main(DesktopMixin, QMainWindow):
 
     def mark_nav(self):
         if self.page == "vault":
-            key = "v:fav" if self.f_fav else "v:" + self.f_kind if self.f_kind else "g:" + self.f_group if self.f_group is not None else "v:all"
+            key = ("v:fav" if self.f_fav else "t:" + self.f_tag if self.f_tag else "v:" + self.f_kind if self.f_kind else
+                   "g:" + self.f_group if self.f_group is not None else "v:all")
         else:
             key = self.page
         for k, b in self.nav.items():
             b.set_on(k == key)
+        if key in self.nav and hasattr(self, "nav_scroll"):
+            self.nav_scroll.ensureWidgetVisible(self.nav[key], 0, 40)
 
     # ------------------------------------------------------------------ navigation
-    def go(self, page, kind=None, group=None, fav=False):
+    def go(self, page, kind=None, group=None, fav=False, tag=None):
         self.page = page
         if page == "vault":
-            self.f_kind, self.f_group, self.f_fav = kind, group, fav
-            self.vault_page.set_filter(kind, group, fav)
+            self.f_kind, self.f_group, self.f_fav, self.f_tag = kind, group, fav, tag
+            self.vault_page.set_filter(kind, group, fav, tag)
         self.mark_nav()
         self.show_page()
 
@@ -306,9 +457,11 @@ class Main(DesktopMixin, QMainWindow):
             self.audit_page.refresh()
         elif self.page == "settings":
             self.settings_page.refresh()
+        elif self.page == "codes":
+            self.codes_page.refresh()
 
     def focus_search(self):
-        self.go("vault", self.f_kind, self.f_group, self.f_fav)
+        self.go("vault", self.f_kind, self.f_group, self.f_fav, self.f_tag)
         self.vault_page.focus_search()
 
     def escape(self):
@@ -376,6 +529,8 @@ class Main(DesktopMixin, QMainWindow):
         self.rebuild_nav()
         if self.page == "vault":
             self.vault_page.finish_edit(select) if select is not False else None
+        elif self.page == "codes":
+            self.codes_page.refresh()
         self.request_sync()
 
     def new_item(self, kind, **preset):
@@ -491,21 +646,25 @@ class Main(DesktopMixin, QMainWindow):
                 self.lock_now(msg="Your stick left your other computer, so your passwords were locked.")
 
     def check_lock_order(self):
-        """Another computer told this one to lock (presence.py already locked the screen): lock the vault too."""
+        """Another computer told this one to lock (presence.py already locked the screen): lock the vault too. Only a fresh order counts: one left over from
+        earlier (the app was closed when it came) must not lock you out the moment you open the app."""
         if presence is None:
             return
         try:
             m = presence.LOCK_IN.stat().st_mtime
         except OSError:
             return
-        if m > self.lock_in_seen:
-            self.lock_in_seen = m
-            try:
-                who = json.loads(presence.LOCK_IN.read_text()).get("from", "your other computer")
-            except (OSError, ValueError):
-                who = "your other computer"
-            if self.vault and not self.manual_key:
-                self.lock_now(msg=f"{who} told this computer to lock.")
+        if m <= self.lock_in_seen:
+            return
+        self.lock_in_seen = m
+        try:
+            info = json.loads(presence.LOCK_IN.read_text())
+        except (OSError, ValueError):
+            return
+        if time.time() - float(info.get("at", 0)) > 120:
+            return
+        if self.vault and not self.manual_key:
+            self.lock_now(msg=f"{info.get('from', 'your other computer')} told this computer to lock.")
 
     def maybe_upgrade_link(self):
         """Older paired computers talk to the server with a script that doesn't know the device list yet: update it while the stick is here."""
@@ -1114,7 +1273,8 @@ class Main(DesktopMixin, QMainWindow):
             self.bridge_note = "Off."
             return
         try:
-            self.bridge = core.Bridge(int(self.s["bridge_port"]), self.s["bridge_token"], self.bridge_state, lambda h, n: self.signals.filled.emit(h, n), lambda d: self.signals.captured.emit(d))
+            self.bridge = core.Bridge(int(self.s["bridge_port"]), self.s["bridge_token"], self.bridge_state, lambda h, n: self.signals.filled.emit(h, n), lambda d: self.signals.captured.emit(d),
+                                      self.passkey_from_bridge)
             self.bridge.start()
             self.bridge_note = f"Listening on 127.0.0.1:{self.s['bridge_port']} (this computer only)."
         except OSError as e:
@@ -1133,6 +1293,90 @@ class Main(DesktopMixin, QMainWindow):
                    403: "a request was refused because it didn't come from the browser extension", 423: "the browser asked while the vault was locked (plug in the stick)",
                    400: "the page wasn't https, so nothing was offered"}.get(last["code"], f"answered {last['code']}")
         return f"{self.bridge_note}\nLast contact from a browser at {when}: {meaning}."
+
+    # -- passkeys: a website asks (through the browser extension), you approve here
+    def passkey_from_bridge(self, kind, body):
+        """Runs in the bridge's thread: hand the request to the window and wait for your answer (up to two minutes)."""
+        if not self.s.get("passkeys_enabled", True):
+            return {"available": 0} if kind == "query" else {"fallback": True}
+        if kind == "query":                                       # no window, just: could this app answer?
+            try:
+                rp = passkeys.check_origin(str(body.get("origin", "")), str(body.get("rpId", "")))
+                return {"available": len(passkeys.find(self.entries, rp, body.get("allowCredentials") or None))}
+            except passkeys.PasskeyError:
+                return {"available": 0}
+        box = {"event": threading.Event(), "result": None}
+        self.signals.passkey.emit(kind, body, box)
+        box["event"].wait(130)
+        return box["result"] or {"error": "NotAllowedError", "message": "No answer in time."}
+
+    def on_passkey(self, kind, body, box):
+        try:
+            box["result"] = self.passkey_answer(kind, body)
+        except passkeys.PasskeyError as e:
+            box["result"] = {"error": e.name, "message": str(e)}
+        except Exception as e:                                    # never leave the page hanging
+            self.log(f"Passkey request failed: {type(e).__name__}")
+            box["result"] = {"error": "NotAllowedError", "message": "Something went wrong in the Password Manager."}
+        finally:
+            box["event"].set()
+
+    def passkey_answer(self, kind, body):
+        """The answer to one request. May show a window. Raises PasskeyError for a refusal the page should see."""
+        if not self.vault:
+            raise passkeys.PasskeyError("NotAllowedError", "The vault is locked.")
+        origin = str(body.get("origin", ""))
+        rp_id = passkeys.check_origin(origin, str(body.get("rpId", "")))
+        try:
+            chash = passkeys.unb64u(str(body.get("clientDataHash", "")))
+        except ValueError:
+            chash = b""
+        if len(chash) != 32:
+            raise passkeys.PasskeyError("NotAllowedError", "Bad request.")
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if kind == "create":
+            user = {k: str((body.get("user") or {}).get(k, ""))[:200] for k in ("id", "name", "displayName")}
+            name = str(body.get("rpName") or rp_id)[:80]
+            algs = [int(a.get("alg")) for a in (body.get("pubKeyCredParams") or []) if isinstance(a, dict) and isinstance(a.get("alg"), int)]
+            existing = passkeys.find(self.entries, rp_id)
+            if any((e["data"].get("cred_id") in (body.get("excludeCredentials") or [])) for e in existing):
+                raise passkeys.PasskeyError("InvalidStateError", "You already have a passkey for this account.")
+            same = [e for e in existing if e["data"].get("user_handle") == user["id"] and user["id"]]
+            if algs and passkeys.ALG_ES256 not in algs:
+                raise passkeys.PasskeyError("NotSupportedError", "This site doesn't accept the kind of passkey this app makes.")
+            what, _ = PasskeyPrompt(self, "create", name, rp_id, [user["name"] or user["displayName"]], replaces=bool(same)).run()
+            if what == "browser":
+                return {"fallback": True}
+            if what != "allow":
+                raise passkeys.PasskeyError("NotAllowedError", "You said no.")
+            record, answer = passkeys.create(rp_id, name, user, chash, algs)
+            tags = model.item_tags(same[0]) if same else []
+            item = passkeys.as_item(record, tags or None)
+            if same:
+                item["title"] = same[0]["title"]
+                self.vault.edit(same[0], dict(same[0], data=item["data"], username=item["username"]))
+                self.reload(select=False)
+            else:
+                self.save_item(None, item, quiet=True)
+            self.log(f"Passkey saved for {rp_id}" + (" (replaced the old one)" if same else ""))
+            self.toast(f"Passkey saved for {rp_id}", "good")
+            return {"ok": True, **answer, "transports": ["internal", "hybrid"]}
+        if kind == "get":
+            allow = body.get("allowCredentials") or None
+            cands = passkeys.find(self.entries, rp_id, allow)
+            if not cands:
+                return {"fallback": True}
+            names = [c["data"].get("user_name") or c["data"].get("display_name") or c["title"] for c in cands]
+            what, idx = PasskeyPrompt(self, "get", cands[0]["data"].get("rp_name") or rp_id, rp_id, names).run()
+            if what == "browser":
+                return {"fallback": True}
+            if what != "allow":
+                raise passkeys.PasskeyError("NotAllowedError", "You said no.")
+            self.log(f"Passkey used to sign in to {rp_id}")
+            return {"ok": True, **passkeys.sign(cands[idx]["data"], chash)}
+        raise passkeys.PasskeyError("NotSupportedError", "Unknown request.")
 
     def toggle_bridge(self, on):
         self.start_bridge()

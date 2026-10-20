@@ -98,6 +98,9 @@ class SettingsPage(QWidget):
         self.add(c, "Open when the stick is plugged in", "Starts this app by itself as soon as your stick goes in.", self.sw("launch_on_plug"), "start launch usb")
         self.add(c, "Clear a copied password after", "How long a copied password stays on the clipboard before it is wiped.", self.spin("clip_clear_s", 0, 300, "  seconds"), "clipboard copy")
         self.add(c, "Hide a shown password after", "A password you reveal covers itself again after this long.", self.spin("reveal_timeout_s", 0, 300, "  seconds"), "reveal show hide")
+        self.add(c, "Show each site's logo", "Downloads the icon from the site itself (never from an icon service that would learn which sites you use) and keeps it on this computer. Off shows a coloured letter.",
+                 self.sw("show_logos", lambda on: (setattr(self.win.logos, "enabled", on), self.win.vault_page.list.viewport().update())), "logo icon favicon")
+        self.add(c, "Logo pictures", "", button("Clear saved logos", "", lambda: (self.win.logos.clear(), self.win.vault_page.list.viewport().update(), self.win.toast("Logos cleared"))), "logo cache clear")
         self.add(c, "Lock after being idle for", "Locks the vault when you haven't touched this computer.", self.spin("idle_lock_min", 0, 240, "  minutes"), "idle timeout")
 
         c = self.card("Warnings", "Turn these off if you'd rather not be nagged.")
@@ -142,6 +145,8 @@ class SettingsPage(QWidget):
         self.add(c, "Let the browser ask this app for logins", "Works only while the stick is in. Only your browser extension can use it, only on this computer.", self.sw("bridge_enabled", w.toggle_bridge), "chrome firefox brave fill")
         self.bridge_label = label("", "faint", True)
         c.body.addWidget(self.bridge_label)
+        self.add(c, "Save and use passkeys", "When a website offers a passkey, the extension offers to keep it here, and signs you in with it later. You always approve each use in this app. Off hands passkeys back to the browser.",
+                 self.sw("passkeys_enabled"), "passkey webauthn sign in")
         self.pair_code = QLineEdit(s["bridge_token"])
         self.pair_code.setReadOnly(True)
         self.pair_code.setProperty("role", "mono")

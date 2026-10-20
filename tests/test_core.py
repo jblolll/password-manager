@@ -283,6 +283,57 @@ class VerificationCodes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CLI, "KeePassXC isn't installed")
+class NestedFolders(unittest.TestCase):
+    """Folders inside folders and tags, on a real vault file (through KeePassXC)."""
+
+    def make(self, name):
+        d = BASE / name
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+        key, db = d / "k.keyx", d / "v.kdbx"
+        key.write_bytes(os.urandom(64))
+        subprocess.run([pm.cli_path(), "db-create", "-q", "--set-key-file", str(key), str(db)], check=True, capture_output=True)
+        return pm.Vault(db, key)
+
+    def item(self, group, title="Canvas", **kw):
+        return {"group": group, "title": title, "username": "me", "password": "pw-1", "url": "https://canvas.instructure.com", "notes": "", "otp": "", "history": [],
+                "kind": "login", "data": {"tags": ["school", "classes"]}, **kw}
+
+    @unittest.skipUnless(HAVE_CLI, "KeePassXC isn't installed")
+    def test_deep_folders_are_made_one_level_at_a_time(self):
+        v = self.make("nested-a")
+        v.ensure_group("Websites/School/Canvas")                       # the engine alone refuses a folder whose parent is missing
+        self.assertTrue({"Websites", "Websites/School", "Websites/School/Canvas"} <= set(v.groups()))
+        v.ensure_group("Websites/School/Canvas")                       # again: nothing breaks, nothing doubles
+        self.assertEqual(sorted(g for g in v.groups() if g.startswith("Websites")), ["Websites", "Websites/School", "Websites/School/Canvas"])
+
+    @unittest.skipUnless(HAVE_CLI, "KeePassXC isn't installed")
+    def test_items_live_in_nested_folders_move_and_keep_their_tags(self):
+        v = self.make("nested-b")
+        v.ensure_group("Websites/School/Canvas")
+        v.add(self.item("Websites/School/Canvas"))
+        e = v.load()[0]
+        self.assertEqual((e["group"], e["kind"], e["data"]["tags"]), ("Websites/School/Canvas", "login", ["school", "classes"]))
+        v.edit(e, dict(e, group="Websites/School"))                    # up one folder
+        e = v.load()[0]
+        self.assertEqual((e["group"], e["title"], e["password"], e["data"]["tags"]), ("Websites/School", "Canvas", "pw-1", ["school", "classes"]))
+        v.edit(e, dict(e, data={"tags": ["school"]}))                  # tags can change like anything else
+        self.assertEqual(v.load()[0]["data"]["tags"], ["school"])
+
+    @unittest.skipUnless(HAVE_CLI, "KeePassXC isn't installed")
+    def test_only_empty_folders_can_be_deleted(self):
+        v = self.make("nested-c")
+        v.ensure_group("A/B/C")
+        v.add(self.item("A/B", title="Thing"))
+        with self.assertRaises(pm.VaultError):
+            v.delete_group("A/B")                                      # an item is inside
+        with self.assertRaises(pm.VaultError):
+            v.delete_group("A")                                        # folders are inside
+        v.delete_group("A/B/C")                                        # empty: allowed (it goes to the recycle bin, which the app hides)
+        self.assertNotIn("A/B/C", v.groups())
+        self.assertEqual([e["title"] for e in v.load()], ["Thing"])
+
+
 class VaultOtp(unittest.TestCase):
     def test_otp_survives_add_edit_load(self):
         BASE.mkdir(exist_ok=True)

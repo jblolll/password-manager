@@ -16,11 +16,17 @@ def entries():
         L("Websites", "Amazon", "justin.brook@gmail.com", "amazon123", "https://www.amazon.com", modified="2024-11-01T09:00:00Z"),
         L("Websites", "Netflix", "justin.brook@gmail.com", "amazon123", "https://www.netflix.com", modified="2024-11-01T09:00:00Z"),
         L("Websites", "Discord", "jblol#2210", "Qm7$nVe8&Rt3Zc!1xKd", "https://discord.com", otp="otpauth://totp/Discord?secret=MFRGGZDFMZTWQ2LK", modified="2026-09-20T09:00:00Z"),
-        L("Websites", "Brightspace", "jbrook@patriots.cf.edu", "Patriots#2026-fall-Sem!", "https://brightspace.ucf.edu", modified="2026-08-26T09:00:00Z"),
-        L("Websites", "Chase", "jblol", "ZpL4!uYw9@Hq2Ns7&Vc", "https://www.chase.com", otp="otpauth://totp/Chase?secret=ONSWG4TFOQYTEMZU", modified="2026-10-01T09:00:00Z"),
+        L("Websites/School", "Brightspace", "jbrook@patriots.cf.edu", "Patriots#2026-fall-Sem!", "https://brightspace.ucf.edu", otp="otpauth://totp/Brightspace?secret=NBSWY3DPEB3W64TM", data={"tags": ["school"]}, modified="2026-08-26T09:00:00Z"),
+        L("Websites/School/Canvas", "Canvas", "jbrook@patriots.cf.edu", "Cv9!pLm2#Qr7Xz4$Wt", "https://canvas.instructure.com", data={"tags": ["school", "classes"]}, modified="2026-09-02T09:00:00Z"),
+        L("Websites/Work", "Paychex Flex", "justinb04", "Hk3&nVe8!Rt5Zc2#Lm", "https://login.flex.paychex.com", otp="otpauth://totp/Paychex?secret=MFRGGZDFMZTWQ2LK", data={"tags": ["work", "money"]}, modified="2026-09-12T09:00:00Z"),
+        L("Websites", "Chase", "jblol", "ZpL4!uYw9@Hq2Ns7&Vc", "https://www.chase.com", otp="otpauth://totp/Chase?secret=ONSWG4TFOQYTEMZU", data={"tags": ["money"]}, modified="2026-10-01T09:00:00Z"),
         L("Websites", "Spotify", "justin.brook", "password1", "https://open.spotify.com", modified="2025-01-14T09:00:00Z"),
         L("Apps", "Steam", "jblol_gaming", "Tr8&kLm2!Qz5Wv9#Bn", "steam://", modified="2026-07-03T09:00:00Z"),
         L("Servers & SSH", "recall server", "ubuntu", "", "ssh://129.213.162.117", notes="Public key: ssh-ed25519 AAAAC3Nz…\nFingerprint: SHA256:abc123", modified="2026-05-02T09:00:00Z"),
+        _e("passkey", "Passkeys", "GitHub (jblol)", "jblol", "", "https://github.com", data={"rp_id": "github.com", "rp_name": "GitHub", "cred_id": "Kx3vQ9aZpL2mW8sT1yHn5bRcUe7dFgJ0", "user_name": "jblol",
+                                                                                          "user_handle": "dXNlci0x", "created": "2026-10-12", "key": "demo", "alg": -7, "tags": ["dev"]}),
+        _e("passkey", "Passkeys", "Google (justin.brook@gmail.com)", "justin.brook@gmail.com", "", "https://accounts.google.com", data={"rp_id": "google.com", "rp_name": "Google", "cred_id": "Pq7wE2rT9yUi4oAs6dFg1hJk3lZx5cVb", "user_name": "justin.brook@gmail.com",
+                                                                                                                                    "user_handle": "dXNlci0y", "created": "2026-10-15", "key": "demo", "alg": -7}),
         _e("card", "Cards", "Chase Sapphire", "Justin D Brook", "", "", "Travel card. Call 1-800-432-3117 if lost.",
            data={"holder": "Justin D Brook", "number": "4242424242424242", "expiry": "08/28", "cvv": "123", "pin": "4821", "zip": "34461", "fav": True}),
         _e("card", "Cards", "Amex Gold", "Justin D Brook", "", "", "", data={"holder": "Justin D Brook", "number": "378282246310005", "expiry": "03/27", "cvv": "4411", "zip": "34461"}),
@@ -43,11 +49,29 @@ class DemoVault:
     def load(self):
         return [dict(e) for e in sorted(self.items, key=lambda e: (e["title"].lower(), e["group"]))]
 
+    extra = set()
+
     def groups(self):
-        return sorted({e["group"] for e in self.items} | {"Websites", "Apps", "Servers & SSH", "Other"})
+        out = {e["group"] for e in self.items} | {"Websites", "Apps", "Servers & SSH", "Other"} | self.extra
+        for g in list(out):
+            parts = g.split("/")
+            out |= {"/".join(parts[:i]) for i in range(1, len(parts) + 1)}
+        return sorted(out)
 
     def ensure_group(self, g):
-        pass
+        parts = g.split("/") if g else []
+        self.extra = self.extra | {"/".join(parts[:i]) for i in range(1, len(parts) + 1)}
+
+    def delete_group(self, g):
+        if any(e["group"] == g or e["group"].startswith(g + "/") for e in self.items) or any(x.startswith(g + "/") for x in self.groups()):
+            from jblol_pm import VaultError
+            raise VaultError("The folder isn't empty.")
+        self.extra = {x for x in self.extra if x != g}
+
+    @staticmethod
+    def check_name(name, what):
+        from jblol_pm import Vault
+        Vault.check_name(name, what)
 
     def attachments(self, e):
         return []

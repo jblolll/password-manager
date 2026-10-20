@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (QAbstractButton, QFrame, QLayout, QScrollArea, QH
 from . import icons, model, qr
 from .theme import C, MONO
 
-KIND_ICON = {"login": "key", "card": "card", "note": "note", "wifi": "wifi"}
-KIND_TINT = {"card": C["violet"], "note": C["amber"], "wifi": C["teal"]}
+KIND_ICON = {"login": "key", "card": "card", "note": "note", "wifi": "wifi", "passkey": "passkey"}
+KIND_TINT = {"card": C["violet"], "note": C["amber"], "wifi": C["teal"], "passkey": C["pink"]}
 
 
 class VScroll(QScrollArea):
@@ -66,6 +66,19 @@ def button(text, kind="", fn=None, icon=None, icon_color=None):
         b.setIcon(icons.icon(icon, icon_color or ("#ffffff" if kind == "primary" else C["bad"] if kind == "danger" else C["soft"]), 16))
         b.setIconSize(QSize(16, 16))
     b.setCursor(Qt.PointingHandCursor)
+    if fn:
+        b.clicked.connect(lambda _=False: fn())
+    return b
+
+
+def small_chip(text, fn=None, checkable=False):
+    """A small rounded tag button (the full look is written out, because a style sheet on one button replaces the shared one)."""
+    b = QPushButton(text)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setCheckable(checkable)
+    b.setStyleSheet(f"QPushButton {{ background:transparent; border:1px solid {C['line2']}; border-radius:11px; padding:2px 10px; color:{C['muted']}; font-size:12px; font-weight:550; }}"
+                    f"QPushButton:hover {{ color:{C['ink']}; border-color:#3a4560; }}"
+                    f"QPushButton:checked {{ background:{C['accent_soft']}; border-color:#2e458f; color:{C['accent_hi']}; }}")
     if fn:
         b.clicked.connect(lambda _=False: fn())
     return b
@@ -149,12 +162,25 @@ class Switch(QAbstractButton):
         p.drawEllipse(QRectF(x, 4, 16, 16))
 
 
-def avatar_pixmap(title, kind="login", size=40, dpr=2.0):
+def avatar_pixmap(title, kind="login", size=40, dpr=2.0, logo=None):
+    """The little tile for an item: the site's logo on a light tile if there is one, else a coloured tile with the first letter (or the kind's icon)."""
     px = QPixmap(int(size * dpr), int(size * dpr))
     px.setDevicePixelRatio(dpr)
     px.fill(Qt.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    if logo is not None and not logo.isNull():
+        p.setPen(QPen(QColor(0, 0, 0, 40), 1))
+        p.setBrush(QColor("#f4f6fb"))
+        p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), size * 0.28, size * 0.28)
+        pad = size * 0.17
+        inner = size - 2 * pad
+        scaled = logo.scaled(int(inner * dpr), int(inner * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        w, h = scaled.width() / dpr, scaled.height() / dpr
+        p.drawPixmap(int(pad + (inner - w) / 2), int(pad + (inner - h) / 2), int(w), int(h), scaled)
+        p.end()
+        return px
     if kind in KIND_TINT:
         tint = QColor(KIND_TINT[kind])
         top, bot = QColor(tint), QColor(tint)
@@ -184,14 +210,14 @@ def avatar_pixmap(title, kind="login", size=40, dpr=2.0):
 
 
 class Avatar(QLabel):
-    def __init__(self, title="", kind="login", size=40):
+    def __init__(self, title="", kind="login", size=40, logo=None):
         super().__init__()
         self.size_ = size
         self.setFixedSize(size, size)
-        self.set(title, kind)
+        self.set(title, kind, logo)
 
-    def set(self, title, kind="login"):
-        self.setPixmap(avatar_pixmap(title, kind, self.size_))
+    def set(self, title, kind="login", logo=None):
+        self.setPixmap(avatar_pixmap(title, kind, self.size_, logo=logo))
 
 
 class Pill(QLabel):
@@ -453,9 +479,10 @@ class ItemDelegate(QStyledItemDelegate):
     """One row of the item list: a tile, the name, a line of detail, and small flags at the right."""
     H = 64
 
-    def __init__(self, parent=None, health=None):
+    def __init__(self, parent=None, health=None, logos=None):
         super().__init__(parent)
         self.health = health or (lambda e: False)
+        self.logos = logos
         self.cache = {}
 
     def sizeHint(self, opt, idx):
@@ -470,6 +497,8 @@ class ItemDelegate(QStyledItemDelegate):
             return " · ".join(x for x in (model.card_brand(n) or "Card", ("•••• " + n[-4:]) if n else "", ("exp " + d["expiry"]) if d.get("expiry") else "") if x)
         if k == "note":
             return (e.get("notes") or "").strip().split("\n")[0][:80] or "Empty note"
+        if k == "passkey":
+            return f"{d.get('rp_id', '')}  ·  {e.get('username') or 'passkey'}"
         if k == "wifi":
             return dict(model.WIFI_SECURITY).get(d.get("security", "WPA"), "Wi-Fi") + (" · hidden" if d.get("hidden") else "")
         from jblol_pm import host_of
@@ -488,9 +517,10 @@ class ItemDelegate(QStyledItemDelegate):
             p.setBrush(QColor(C["accent_soft"] if sel else C["raised"]))
             p.drawRoundedRect(QRectF(r).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
         kind = model.kind_of(e)
-        key = (e["title"][:1].lower(), kind, e["title"])
+        logo = self.logos.pixmap_for(e) if (self.logos is not None and kind in ("login", "passkey")) else None
+        key = (e["title"][:1].lower(), kind, e["title"], logo.cacheKey() if logo is not None else 0)
         if key not in self.cache:
-            self.cache[key] = avatar_pixmap(e["title"], kind, 40)
+            self.cache[key] = avatar_pixmap(e["title"], kind, 40, logo=logo)
         p.drawPixmap(r.left() + 12, r.top() + (r.height() - 40) // 2, self.cache[key])
         x = r.left() + 62
         right = 12 + (22 if (e.get("data") or {}).get("fav") else 0) + (22 if self.health(e) else 0)

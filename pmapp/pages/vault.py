@@ -39,6 +39,7 @@ class VaultPage(QWidget):
         self.f_kind = None
         self.f_group = None
         self.f_fav = False
+        self.f_tag = None
         self.sort = "name"
         self.current = None
         root = QHBoxLayout(self)
@@ -62,7 +63,7 @@ class VaultPage(QWidget):
         top.addWidget(self.search, 1)
         self.b_new = button("New", "primary", None, "plus")
         menu = QMenu(self.b_new)
-        for kind in model.KINDS:
+        for kind in (k for k in model.KINDS if k != "passkey"):                      # (passkeys are made by a website, through the browser extension)
             a = menu.addAction(icons.icon({"login": "key", "card": "card", "note": "note", "wifi": "wifi"}[kind], C["soft"], 18), model.KIND_LABEL[kind])
             a.triggered.connect(lambda _=False, k=kind: win.new_item(k))
         self.b_new.setMenu(menu)
@@ -80,7 +81,7 @@ class VaultPage(QWidget):
         head.addWidget(self.b_sort)
         lv.addLayout(head)
         self.list = QListWidget()
-        self.list.setItemDelegate(ItemDelegate(self.list, lambda e: (e["group"], e["title"]) in win.health))
+        self.list.setItemDelegate(ItemDelegate(self.list, lambda e: (e["group"], e["title"]) in win.health, win.logos))
         self.list.setMouseTracking(True)
         self.list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self.list.currentItemChanged.connect(self.on_select)
@@ -101,8 +102,8 @@ class VaultPage(QWidget):
         root.addWidget(self.detail, 1)
 
     # -- filters
-    def set_filter(self, kind=None, group=None, fav=False):
-        self.f_kind, self.f_group, self.f_fav = kind, group, fav
+    def set_filter(self, kind=None, group=None, fav=False, tag=None):
+        self.f_kind, self.f_group, self.f_fav, self.f_tag = kind, group, fav, tag
         self.refresh()
 
     def cycle_sort(self):
@@ -119,12 +120,14 @@ class VaultPage(QWidget):
             d = e.get("data") or {}
             if self.f_kind and k != self.f_kind:
                 continue
-            if self.f_group is not None and e["group"] != self.f_group:
+            if self.f_group is not None and not model.in_folder(e["group"], self.f_group):
                 continue
             if self.f_fav and not d.get("fav"):
                 continue
+            if self.f_tag and self.f_tag not in model.item_tags(e):
+                continue
             if q:
-                extra = " ".join(str(d.get(x, "")) for x in ("ssid", "holder")) + (" " + model.card_brand(d.get("number", "")) if k == "card" else "")
+                extra = " ".join(str(d.get(x, "")) for x in ("ssid", "holder", "rp_id", "user_name")) + " " + " ".join(model.item_tags(e)) + (" " + model.card_brand(d.get("number", "")) if k == "card" else "")
                 if q not in " ".join((e["title"], e["username"], e["url"], e["notes"], e["group"], extra)).lower():
                     continue
             out.append(e)
@@ -151,7 +154,8 @@ class VaultPage(QWidget):
             if cur and (e["group"], e["title"]) == (cur["group"], cur["title"]):
                 sel = it
         self.list.blockSignals(False)
-        name = (model.KIND_PLURAL[self.f_kind] if self.f_kind else "Favorites" if self.f_fav else self.f_group if self.f_group is not None else "All items")
+        name = (model.KIND_PLURAL[self.f_kind] if self.f_kind else "Favorites" if self.f_fav else "#" + self.f_tag if self.f_tag else
+                self.f_group.replace("/", " / ") if self.f_group is not None else "All items")
         self.title.setText(name)
         self.count.setText(f"{len(items)}")
         self.list.setVisible(bool(items))

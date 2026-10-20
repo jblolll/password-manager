@@ -226,7 +226,7 @@ class Pages(unittest.TestCase):
             w.nav[key].click()
             pump()
             self.assertEqual(vp.f_group, key[2:], key)
-            self.assertTrue(all(vp.list.item(i).data(0x100)["group"] == key[2:] for i in range(vp.list.count())), key)
+            self.assertTrue(all(model.in_folder(vp.list.item(i).data(0x100)["group"], key[2:]) for i in range(vp.list.count())), key)
         w.nav["v:all"].click()
         self.assertEqual((vp.f_kind, vp.f_group, vp.f_fav), (None, None, False))
         for key, page in (("gen", "gen"), ("health", "health"), ("usb", "usb"), ("audit", "audit"), ("settings", "settings")):
@@ -285,6 +285,116 @@ class Pages(unittest.TestCase):
         for _ in range(3):
             self.w.health_page.refresh()
         pump()
+
+    def test_tags(self):
+        vp, w = self.w.vault_page, self.w
+        w.go("vault", tag="school")
+        self.assertEqual(sorted(vp.list.item(i).data(0x100)["title"] for i in range(vp.list.count())), ["Brightspace", "Canvas"])
+        self.assertEqual(vp.title.text(), "#school")
+        w.vault_page.search.setText("classes")                           # inside the tag, search narrows further
+        self.assertEqual([vp.list.item(i).data(0x100)["title"] for i in range(vp.list.count())], ["Canvas"])
+        w.go("vault")
+        w.vault_page.search.setText("classes")                           # and search finds a tag's items without opening the tag
+        self.assertEqual([vp.list.item(i).data(0x100)["title"] for i in range(vp.list.count())], ["Canvas"])
+        w.vault_page.search.setText("")
+        self.assertIn("t:school", w.nav)
+        self.assertEqual(w.nav["t:school"].badge.text(), "2")
+        # adding a tag in the editor
+        w.go("vault")
+        vp.select(self.find("Amazon"))
+        vp.edit_current()
+        vp.detail.editor.w["tags"].setText("Shopping, big  spender,shopping")
+        vp.detail.editor.save()
+        self.assertEqual(self.find("Amazon")["data"]["tags"], ["shopping", "big-spender"])
+        self.assertIn("t:shopping", w.nav)
+
+    def test_renaming_and_removing_a_tag_changes_every_item(self):
+        w = self.w
+        from unittest import mock
+        with mock.patch("pmapp.window.QInputDialog.getText", return_value=("homework", True)):
+            w.rename_tag("school")
+        self.assertEqual(sorted(e["title"] for e in w.entries if "homework" in model.item_tags(e)), ["Brightspace", "Canvas"])
+        self.assertFalse(any("school" in model.item_tags(e) for e in w.entries))
+        with mock.patch("pmapp.window.QMessageBox.question", return_value=__import__("PySide6.QtWidgets", fromlist=["x"]).QMessageBox.Yes):
+            w.rename_tag("homework", remove=True)
+        self.assertFalse(any("homework" in model.item_tags(e) for e in w.entries))
+        self.assertEqual(self.find("Canvas")["data"].get("tags"), ["classes"])
+
+    def test_folder_tree_in_the_sidebar_and_filtering_by_a_folder_includes_what_is_inside(self):
+        w, vp = self.w, self.w.vault_page
+        for key in ("g:Websites", "g:Websites/School", "g:Websites/School/Canvas", "g:Websites/Work"):
+            self.assertIn(key, w.nav, key)
+        self.assertEqual(w.nav["g:Websites/School"].badge.text(), "2")           # Brightspace and Canvas
+        w.nav["g:Websites/School"].click()
+        self.assertEqual(sorted(vp.list.item(i).data(0x100)["title"] for i in range(vp.list.count())), ["Brightspace", "Canvas"])
+        self.assertEqual(vp.title.text(), "Websites / School")
+        w.nav["g:Websites"].click()
+        self.assertGreaterEqual(vp.list.count(), 8, "a parent folder shows the folders inside it too")
+        # fold the tree
+        w.toggle_folder("Websites/School")
+        self.assertNotIn("g:Websites/School/Canvas", w.nav)
+        self.assertIn("g:Websites/School", w.nav)
+        w.toggle_folder("Websites/School")
+        self.assertIn("g:Websites/School/Canvas", w.nav)
+
+    def test_making_and_deleting_folders(self):
+        from unittest import mock
+        w = self.w
+
+        class Fake:
+            def __init__(self, *a):
+                pass
+
+            def exec(self):
+                return True
+
+            def name(self):
+                return "Clients"
+
+            def parent(self):
+                return "Websites/Work"
+        with mock.patch("pmapp.window.FolderDialog", Fake):
+            w.new_folder()
+        self.assertIn("g:Websites/Work/Clients", w.nav)
+        with mock.patch("pmapp.window.QMessageBox.question", return_value=__import__("PySide6.QtWidgets", fromlist=["x"]).QMessageBox.Yes):
+            w.delete_folder("Websites/Work/Clients")
+        self.assertNotIn("g:Websites/Work/Clients", w.nav)
+
+    def test_the_codes_page_lists_every_login_with_a_code(self):
+        w = self.w
+        w.go("codes")
+        pump()
+        cp = w.codes_page
+        names = sorted(r.e["title"] for r in cp.rows)
+        self.assertEqual(names, sorted(e["title"] for e in w.entries if e.get("otp")))
+        self.assertGreaterEqual(len(names), 5)
+        import jblol_pm as core
+        row = next(r for r in cp.rows if r.e["title"] == "GitHub")
+        code, _ = core.totp_now(row.e["otp"])
+        self.assertEqual(row.code.text().replace(" ", ""), code)
+        cp.search.setText("github")
+        self.assertEqual([r.e["title"] for r in cp.rows], ["GitHub"])
+        cp.search.setText("")
+        w.set_opt("codes_visible", False)
+        cp.tick()
+        self.assertIn("•", cp.rows[0].code.text())
+        w.set_opt("codes_visible", True)
+        self.assertEqual(w.nav["codes"].badge.text(), str(len(names)))
+
+    def test_adding_a_code_to_a_login(self):
+        w = self.w
+        w.go("codes")
+        amazon = self.find("Amazon")
+        self.assertFalse(amazon.get("otp"))
+        from pmapp.pages.codes import AddCodeDialog
+        d = AddCodeDialog(w, [amazon])
+        d.key.setText("not a key!!")
+        d.save()
+        self.assertTrue(d.err.text())
+        d.key.setText("JBSWY3DPEHPK3PXP")
+        d.accept = lambda: None
+        d.save()
+        self.assertTrue(self.find("Amazon")["otp"].startswith("otpauth://totp/"))
 
     def test_each_kind_of_item_shows(self):
         for title in ("GitHub", "Chase Sapphire", "Locker combination", "Home Wi-Fi"):
@@ -420,6 +530,40 @@ class Pages(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DemoIsSealed(unittest.TestCase):
+    def test_a_demo_window_never_touches_the_real_stick_or_vault(self):
+        w = window.Main(demo=True)
+        self.assertFalse(w.timer.isActive(), "no background check of the real stick")
+        w.lock_now()
+        for _ in range(3):
+            pump()
+        self.assertIsNone(w.vault, "locked stays locked: nothing reopens it behind your back")
+
+
+class LockOrders(unittest.TestCase):
+    def test_only_a_fresh_order_locks_the_vault(self):
+        import json
+        import presence
+        w = window.Main(demo=True)
+        d = Path(tempfile.mkdtemp())
+        presence.LOCK_IN = d / "presence-lock.json"
+        from pmapp import demo
+        w.vault = demo.DemoVault()
+        w.set_entries(w.vault.load())
+        # an order from long ago (found when the app opens) does nothing
+        presence.LOCK_IN.write_text(json.dumps({"id": "old", "from": "desktop", "at": time.time() - 3600}))
+        w.check_lock_order()
+        self.assertIsNotNone(w.vault)
+        # a fresh one locks, once
+        presence.LOCK_IN.write_text(json.dumps({"id": "new", "from": "desktop", "at": time.time()}))
+        os.utime(presence.LOCK_IN, (time.time() + 5, time.time() + 5))
+        w.check_lock_order()
+        self.assertIsNone(w.vault)
+        w.vault = demo.DemoVault()
+        w.check_lock_order()
+        self.assertIsNotNone(w.vault, "the same order doesn't lock again")
 
 
 class SshKeys(unittest.TestCase):

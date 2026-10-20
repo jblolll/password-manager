@@ -12,10 +12,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-KINDS = ("login", "card", "note", "wifi")
-KIND_LABEL = {"login": "Login", "card": "Card", "note": "Secure note", "wifi": "Wi-Fi"}
-KIND_PLURAL = {"login": "Logins", "card": "Cards", "note": "Secure notes", "wifi": "Wi-Fi networks"}
-KIND_GROUP = {"card": "Cards", "note": "Secure notes", "wifi": "Wi-Fi"}
+KINDS = ("login", "card", "note", "wifi", "passkey")
+KIND_LABEL = {"login": "Login", "card": "Card", "note": "Secure note", "wifi": "Wi-Fi", "passkey": "Passkey"}
+KIND_PLURAL = {"login": "Logins", "card": "Cards", "note": "Secure notes", "wifi": "Wi-Fi networks", "passkey": "Passkeys"}
+KIND_GROUP = {"card": "Cards", "note": "Secure notes", "wifi": "Wi-Fi", "passkey": "Passkeys"}
 GROUP_KIND = {v: k for k, v in KIND_GROUP.items()}
 
 KIND_LINE = re.compile(r"^pm-kind\|(\w+)$", re.M)
@@ -40,7 +40,7 @@ def unpack(notes):
 def pack(notes, kind, data):
     """The notes to store for this item (the kind and fields ride along as two lines; a plain login with nothing extra stores nothing extra)."""
     parts = [(notes or "").rstrip("\n")]
-    data = {k: v for k, v in (data or {}).items() if v not in ("", None, False)}
+    data = {k: v for k, v in (data or {}).items() if v not in ("", None, False, [], {})}
     if kind and kind != "login":
         parts.append(f"pm-kind|{kind}")
     if data:
@@ -256,3 +256,57 @@ def passphrase(n=5, sep="-", cap=False, number=False):
 def pin(n=6):
     import secrets
     return "".join(secrets.choice("0123456789") for _ in range(n))
+
+
+# ------------------------------------------------------------------ tags
+TAG_MAX, TAGS_PER_ITEM = 24, 12
+
+
+def norm_tags(value):
+    """A clean list of tags from a list or from text like "Work, school  bank": lowercase, spaces become dashes, no duplicates, short, at most 12."""
+    if isinstance(value, str):
+        value = value.replace("#", "").split(",")
+    out = []
+    for t in value or []:
+        t = re.sub(r"[^\w\- ]", "", str(t).strip().lower(), flags=re.U).strip()
+        t = re.sub(r"\s+", "-", t)[:TAG_MAX].strip("-")
+        if t and t not in out:
+            out.append(t)
+    return out[:TAGS_PER_ITEM]
+
+
+def item_tags(e):
+    return norm_tags((e.get("data") or {}).get("tags", []))
+
+
+def tag_counts(entries):
+    """[(tag, how many items)] most used first."""
+    counts = {}
+    for e in entries:
+        for t in item_tags(e):
+            counts[t] = counts.get(t, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+# ------------------------------------------------------------------ folders inside folders
+def in_folder(group, folder):
+    """Is an item in this folder (or any folder inside it)?"""
+    return group == folder or group.startswith(folder + "/")
+
+
+def folder_tree(groups, entries, hidden=()):
+    """Folders as rows for the sidebar: [(path, name, depth, items inside it and below, has_children)], parents before children, sorted by name.
+    Cards, secure notes, Wi-Fi and passkeys have their own pages, so their groups are not folders."""
+    skip = set(KIND_GROUP.values()) | set(hidden)
+    paths = set()
+    for g in groups:
+        if g and g.split("/")[0] not in skip:
+            parts = g.split("/")
+            for i in range(1, len(parts) + 1):
+                paths.add("/".join(parts[:i]))
+    logins = [e for e in entries if kind_of(e) != "card" and e["group"].split("/")[0] not in skip]
+    rows = []
+    for p in sorted(paths, key=lambda x: [part.lower() for part in x.split("/")]):
+        n = sum(1 for e in logins if in_folder(e["group"], p))
+        rows.append((p, p.split("/")[-1], p.count("/"), n, any(q.startswith(p + "/") for q in paths)))
+    return rows

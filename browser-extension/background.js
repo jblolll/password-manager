@@ -52,6 +52,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     if (msg.type === "capture") return await post("/capture", { host: msg.host, scheme: msg.scheme, username: msg.username, password: msg.password, kind: msg.kind });
     if (msg.type === "status") return await call("/status");
+    if (msg.type === "passkey") return await post("/passkey/" + msg.kind, msg.body);
     if (msg.type === "config") { await api.storage.local.set(msg.values); return { ok: true }; }
     return { error: "unknown" };
   })().then(sendResponse);

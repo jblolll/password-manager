@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFil
 import jblol_pm as core
 from .. import icons, model
 from ..theme import C, MONO
-from ..widgets import VScroll, Avatar, Field, IconButton, Pill, QRTile, StrengthBar, TotpRing, button, label
+from ..widgets import small_chip, VScroll, Avatar, Field, IconButton, Pill, QRTile, StrengthBar, TotpRing, button, label
 from .generator import GeneratorDialog
 
 BRAND_LOOK = {"Visa": ("#1a3fa8", "#2f6df6"), "Mastercard": ("#2b2f3d", "#494f66"), "Amex": ("#0f6f6b", "#1fb5ad"), "Discover": ("#b34a00", "#f08a24"),
@@ -173,10 +173,10 @@ class ItemView(QWidget):
         self.clear()
         kind = model.kind_of(e)
         d = e.get("data") or {}
-        self.win
+        win = self.win
         head = QHBoxLayout()
         head.setSpacing(16)
-        head.addWidget(Avatar(e["title"], kind, 64), 0, Qt.AlignTop)
+        head.addWidget(Avatar(e["title"], kind, 64, logo=win.logos.pixmap_for(e) if kind in ("login", "passkey") else None), 0, Qt.AlignTop)
         titles = QVBoxLayout()
         titles.setSpacing(4)
         t = label(re.sub(r"([.@/_-])", "\\1\u200b", e["title"] or "Untitled"), "h1")     # (a long name with no spaces may wrap after a dot or an @)
@@ -192,6 +192,14 @@ class ItemView(QWidget):
             pills.addWidget(Pill("Expired", "bad"))
         pills.addStretch(1)
         titles.addLayout(pills)
+        tags = model.item_tags(e)
+        if tags:
+            trow = QHBoxLayout()
+            trow.setSpacing(6)
+            for t in tags[:8]:
+                trow.addWidget(small_chip("#" + t, lambda t=t: win.go("vault", tag=t)))
+            trow.addStretch(1)
+            titles.addLayout(trow)
         head.addLayout(titles, 1)
         acts = QHBoxLayout()
         acts.setSpacing(0)
@@ -389,6 +397,29 @@ class ItemView(QWidget):
         lay.addWidget(n)
         self.col.addWidget(f)
 
+    # -- passkeys
+    def _passkey(self, e, d):
+        win = self.win
+        host = d.get("rp_id", "")
+        self.col.addWidget(Field("Website", host, copy=lambda v: win.copy_plain(v, "Website"), open_=lambda: self._open(host)))
+        if d.get("user_name") or d.get("display_name"):
+            self.col.addWidget(Field("Account", d.get("user_name") or d.get("display_name"), copy=lambda v: win.copy_plain(v, "Account")))
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(Field("Made on", d.get("created", "?")))
+        cid = d.get("cred_id", "")
+        row.addWidget(Field("Passkey ID", (cid[:10] + "…" + cid[-6:]) if len(cid) > 18 else cid, mono=True, copy=lambda v: win.copy_plain(cid, "Passkey ID")))
+        w = QWidget()
+        w.setLayout(row)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.col.addWidget(w)
+        f, lay = tile()
+        lay.addWidget(label("HOW IT WORKS", "label"))
+        lay.addWidget(label("When this site asks you to sign in with a passkey, the browser extension asks this app. You approve it here, and the app signs the request. "
+                            "The private key stays in your vault: it is never shown and never leaves this computer except in the encrypted vault that syncs between your computers.", "muted", True))
+        self.col.addWidget(f)
+        self._notes(e)
+
     # -- Wi-Fi
     def _wifi(self, e, d):
         win = self.win
@@ -477,7 +508,7 @@ class ItemEditor(QWidget):
         self.d0 = dict(d)
         self.clear()
         self.err.setText("")
-        title = {"login": "Login", "card": "Card", "note": "Secure note", "wifi": "Wi-Fi network"}[self.kind]
+        title = {"login": "Login", "card": "Card", "note": "Secure note", "wifi": "Wi-Fi network", "passkey": "Passkey"}[self.kind]
         head = QHBoxLayout()
         self.badge = Avatar(e["title"] or "?", self.kind, 48)
         head.addWidget(self.badge)
@@ -494,7 +525,7 @@ class ItemEditor(QWidget):
             self.w[key] = widget
             self.col.addWidget(form_row(name, widget, *extra))
         t = QLineEdit(e["title"])
-        t.setPlaceholderText({"login": "For example GitHub", "card": "For example Chase Visa", "note": "For example Locker combination", "wifi": "For example Home Wi-Fi"}[self.kind])
+        t.setPlaceholderText({"login": "For example GitHub", "card": "For example Chase Visa", "note": "For example Locker combination", "wifi": "For example Home Wi-Fi", "passkey": "Name"}[self.kind])
         t.textChanged.connect(lambda s: self.badge.set(s or "?", self.kind))
         add("title", "Name", t)
         if self.kind == "login":
@@ -541,6 +572,9 @@ class ItemEditor(QWidget):
             self.col.addWidget(rw)
             add("zip", "Billing ZIP / postal code", QLineEdit(d.get("zip", "")))
             self._notes_field(e)
+        elif self.kind == "passkey":
+            self.col.addWidget(label("The key itself can't be edited. You can rename this passkey and add notes or tags.", "faint", True))
+            self._notes_field(e)
         elif self.kind == "note":
             body = QPlainTextEdit(e.get("notes", ""))
             body.setMinimumHeight(280)
@@ -563,8 +597,33 @@ class ItemEditor(QWidget):
             self.w["hidden"] = hid
             self.col.addWidget(hid)
             self._notes_field(e)
+        tags = QLineEdit(", ".join(model.item_tags(e)))
+        tags.setPlaceholderText("work, school, bank")
+        self.w["tags"] = tags
+        self.col.addWidget(form_row("Tags", tags))
+        self._tag_suggestions(tags)
         self.col.addStretch(1)
         self.w["title"].setFocus()
+
+    def _tag_suggestions(self, edit):
+        """The tags you already use, as small buttons that add or remove the tag in the box."""
+        known = [t for t, _ in model.tag_counts(self.win.entries)][:8]
+        if not known:
+            return
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(label("Yours:", "faint"))
+
+        def flip(t):
+            cur = model.norm_tags(edit.text())
+            edit.setText(", ".join([x for x in cur if x != t] if t in cur else cur + [t]))
+        for t in known:
+            row.addWidget(small_chip("#" + t, lambda t=t: flip(t)))
+        row.addStretch(1)
+        w = QWidget()
+        w.setLayout(row)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.col.addWidget(w)
 
     def _notes_field(self, e):
         n = QPlainTextEdit(e.get("notes", ""))
@@ -614,6 +673,8 @@ class ItemEditor(QWidget):
             e.update(group="Cards", username=data["holder"], password="", notes=w["notes"].toPlainText().rstrip())
             if not e["title"]:
                 e["title"] = f"{model.card_brand(num) or 'Card'}" + (f" •••• {num[-4:]}" if num else "")
+        elif k == "passkey":
+            e.update(group="Passkeys", notes=w["notes"].toPlainText().rstrip(), password="")
         elif k == "note":
             e.update(group="Secure notes", notes=w["notes"].toPlainText().rstrip(), username="", password="")
         else:
@@ -621,7 +682,8 @@ class ItemEditor(QWidget):
             e.update(group="Wi-Fi", username="", password=w["password"].text(), notes=w["notes"].toPlainText().rstrip())
             if not e["title"]:
                 e["title"] = data["ssid"]
-        e["data"] = {k_: v for k_, v in data.items() if v not in ("", None, False)}
+        data["tags"] = model.norm_tags(w["tags"].text())
+        e["data"] = {k_: v for k_, v in data.items() if v not in ("", None, False, [], {})}
         return e
 
     def save(self):
@@ -648,6 +710,93 @@ class Dialog(QDialog):
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(26, 24, 26, 22)
         self.v.setSpacing(12)
+
+
+class PasskeyPrompt(Dialog):
+    """A website asked for a passkey: say who is asking and what for, and let you allow it, hand it back to the browser, or say no.
+    run() -> ("allow", index of the chosen account) | ("browser", None) | ("cancel", None)."""
+
+    def __init__(self, win, mode, site, rp_id, accounts, replaces=False):
+        super().__init__(win, "Passkey", 480)
+        self.choice, self.result_ = ("cancel", None), None
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        make = mode == "create"
+        t = QHBoxLayout()
+        t.setSpacing(14)
+        t.addWidget(Avatar(site or rp_id, "passkey", 52), 0, Qt.AlignTop)
+        col = QVBoxLayout()
+        col.setSpacing(3)
+        col.addWidget(label("Save a passkey?" if make else "Sign in with a passkey?", "h2"))
+        col.addWidget(label(f"{site or rp_id}  ·  {rp_id}", "muted"))
+        t.addLayout(col, 1)
+        self.v.addLayout(t)
+        self.list = None
+        if make:
+            self.v.addWidget(label(f"This makes a new passkey for {accounts[0] or 'your account'} on {rp_id} and keeps it in your vault. "
+                                   "You'll sign in with it instead of a password." + (" It replaces the passkey you already have for this account." if replaces else ""), "muted", True))
+        elif len(accounts) > 1:
+            self.v.addWidget(label(f"Which account do you want to use on {rp_id}?", "muted", True))
+            from PySide6.QtWidgets import QListWidget
+            self.list = QListWidget()
+            self.list.setStyleSheet(f"QListWidget {{ background:{C['raised']}; border:1px solid {C['line']}; border-radius:10px; padding:4px; }}"
+                                    f"QListWidget::item {{ padding:10px 12px; border-radius:8px; }}"
+                                    f"QListWidget::item:selected {{ background:{C['accent_soft']}; color:{C['accent_hi']}; }}"
+                                    f"QListWidget::item:hover {{ background:{C['hover']}; }}")
+            self.list.setFixedHeight(min(220, 44 * len(accounts) + 14))
+            for a in accounts:
+                self.list.addItem(a or "(no name)")
+            self.list.setCurrentRow(0)
+            self.v.addWidget(self.list)
+        else:
+            self.v.addWidget(label(f"Sign in to {rp_id} as {accounts[0] or 'your account'}.", "muted", True))
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(button("Use my browser instead", "ghost", lambda: self._done("browser")))
+        row.addStretch(1)
+        row.addWidget(button("Not now", "", lambda: self._done("cancel")))
+        row.addWidget(button("Save passkey" if make else "Sign in", "primary", lambda: self._done("allow"), "check"))
+        self.v.addLayout(row)
+
+    def _done(self, what):
+        self.choice = (what, self.list.currentRow() if (what == "allow" and self.list is not None) else 0 if what == "allow" else None)
+        self.accept()
+
+    def run(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.exec()
+        return self.choice
+
+
+class FolderDialog(Dialog):
+    """Make a folder, at the top or inside another one."""
+
+    def __init__(self, win, folders, inside=""):
+        super().__init__(win, "New folder", 440)
+        self.v.addWidget(label("New folder", "h2"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("For example School")
+        self.v.addWidget(form_row("Name", self.name_edit))
+        self.where = QComboBox()
+        self.where.addItem("Top level", "")
+        for f in folders:
+            self.where.addItem("  " * f.count("/") + f.split("/")[-1] + ("   (" + f + ")" if "/" in f else ""), f)
+        i = self.where.findData(inside)
+        self.where.setCurrentIndex(max(0, i))
+        self.v.addWidget(form_row("Inside", self.where))
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(button("Cancel", "", self.reject))
+        row.addWidget(button("Make folder", "primary", self.accept, "plus"))
+        self.v.addLayout(row)
+        self.name_edit.setFocus()
+
+    def name(self):
+        return self.name_edit.text().strip().replace("/", "-")
+
+    def parent(self):
+        return self.where.currentData() or ""
 
 
 class HistoryDialog(Dialog):
