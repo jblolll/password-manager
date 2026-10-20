@@ -566,6 +566,51 @@ class LockOrders(unittest.TestCase):
         self.assertIsNotNone(w.vault, "the same order doesn't lock again")
 
 
+class PhoneLink(unittest.TestCase):
+    def setUp(self):
+        from pmapp import demo, link
+        self.link, self.demo = link, demo
+        self.w = window.Main(demo=True)
+        self.w.demo = False                                   # exercise the real handlers on fake server answers (nothing goes out: no worker is started)
+        self.w.s["phone_key"] = core.new_phone_key()
+        self.w.link_seen_file = Path(tempfile.mkdtemp()) / "seen.json"
+        self.key = link.mac_key(core.phone_key_bytes(self.w.s["phone_key"]))
+        self.now = time.time()
+
+    def listing(self, devices=(), orders=()):
+        return {"now": self.now, "devices": [{"id": n["msg"]["id"], "at": self.now - 5, **n} for n in devices], "orders": [{"to": o["msg"]["to"], "at": self.now, **o} for o in orders]}
+
+    def test_a_phone_shows_up_and_can_be_told_to_lock(self):
+        phone = self.link.sign(self.key, {"v": 1, "id": "ph-1", "name": "Justin’s iPhone", "kind": "phone", "iat": int(self.now), "locked": False})
+        self.w.link_done(self.listing([phone]), "")
+        self.assertEqual([p["name"] for p in self.w.link_phones()], ["Justin’s iPhone"])
+        self.w.page = "usb"
+        self.w.usb_page.refresh()
+        texts = " ".join(l.text() for l in self.w.usb_page.findChildren(__import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel))
+        self.assertIn("Justin’s iPhone", texts)
+        self.assertIn("Passwords open", texts)
+        self.w.s["phone_enabled"] = True
+        self.w.link_tick = lambda: None                       # (no real network round in a test)
+        self.w.lock_phone("ph-1", "Justin’s iPhone")
+        self.assertEqual(self.w.link_order, "ph-1", "the order goes out with the next round")
+
+    def test_a_lock_order_from_the_phone_locks_the_vault(self):
+        from unittest import mock
+        self.w.vault = self.demo.DemoVault()
+        self.w.set_entries(self.w.vault.load())
+        order = self.link.order(self.key, self.w.link_id, "ph-1", "Justin’s iPhone", now=int(self.now))
+        with mock.patch.object(window.sysinfo, "lock_session", return_value=True) as ls:
+            self.w.link_done(self.listing(orders=[order]), "")
+            self.assertIsNone(self.w.vault)
+            self.assertTrue(ls.called, "the screen locks too")
+            self.w.vault = self.demo.DemoVault()
+            self.w.link_done(self.listing(orders=[order]), "")
+            self.assertIsNotNone(self.w.vault, "the same order doesn't lock twice")
+        forged = self.link.order(self.link.mac_key(core.phone_key_bytes(core.new_phone_key())), self.w.link_id, "ph-1", "Evil", now=int(self.now))
+        self.w.link_done(self.listing(orders=[forged]), "")
+        self.assertIsNotNone(self.w.vault, "an order signed with another key does nothing")
+
+
 class SshKeys(unittest.TestCase):
     def test_finds_every_private_key_not_just_the_default_names(self):
         """A computer whose only key is ~/.ssh/github_ed25519 (no id_ed25519) once got "this computer has no SSH key yet"."""

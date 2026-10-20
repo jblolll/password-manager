@@ -299,6 +299,15 @@ class SecurityPage(QWidget):
         for d in w.devices():
             self.col.addWidget(self._device(d, kf is not None and mine))
         self.col.addWidget(self._add_device())
+        head = QHBoxLayout()
+        head.addWidget(label("YOUR PHONES", "section"))
+        head.addStretch(1)
+        self.col.addLayout(head)
+        phones = w.link_phones()
+        for p in phones:
+            self.col.addWidget(self._phone(p))
+        if not phones:
+            self.col.addWidget(self._no_phone())
         self.col.addStretch(1)
 
     def _device(self, d, can_command):
@@ -345,6 +354,41 @@ class SecurityPage(QWidget):
             rm.setEnabled(bool(can_command))
             h.addWidget(rm)
         return f
+
+    def _phone(self, p):
+        w = self.win
+        f = QFrame()
+        f.setObjectName("card")
+        h = QHBoxLayout(f)
+        h.setContentsMargins(20, 16, 20, 16)
+        h.setSpacing(16)
+        h.addWidget(icon_tile("phone", "good" if p["online"] else "", 48, 24))
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        r = QHBoxLayout()
+        r.setSpacing(8)
+        r.addWidget(label(p["name"], "h3"))
+        r.addWidget(Pill("Online", "good") if p["online"] else Pill("Seen " + model.ago(time.time() - p["age"])))
+        r.addWidget(Pill("Passwords locked") if p.get("locked") else Pill("Passwords open", "warn"))
+        r.addStretch(1)
+        col.addLayout(r)
+        col.addWidget(label(p.get("os") or "Recall app on your phone", "muted"))
+        h.addLayout(col, 1)
+        b = button("Lock passwords page", "", lambda i=p["id"], n=p["name"]: w.lock_phone(i, n), "lock")
+        b.setEnabled(bool(p["online"] and not p.get("locked")))
+        if not p["online"]:
+            b.setToolTip("The phone isn't reachable right now. Its passwords lock themselves when you leave the app anyway.")
+        h.addWidget(b)
+        return f
+
+    def _no_phone(self):
+        w = self.win
+        on = bool(w.s["phone_enabled"] and w.s["phone_key"])
+        c = Card("No phone yet" if on else "Turn on the phone copy", "Open the Recall app on your phone, then More, Passwords, and it appears here within a minute." if on
+                 else "Settings, “Keep an encrypted copy for the phone”. Your phone then shows up here and can lock, and be locked by, your computers.", flat=True, pad=18)
+        if w.link_error and on:
+            c.body.addWidget(label(w.link_error, "faint", True))
+        return c
 
     def _add_device(self):
         c = Card("Add another computer", "Set up the same way, once per computer. It takes about two minutes.", flat=True, pad=18)

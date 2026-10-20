@@ -95,6 +95,10 @@ def devices():
             {"name": "jblol-desktop-ubuntu", "me": False, "vault": False, "seen": {"at": now - 40, "os": "Ubuntu 26.04 LTS", "locked": False, "stick": False}}]
 
 
+def phones():
+    return [{"id": "ph-demo", "name": "Justin's iPhone", "kind": "phone", "locked": False, "age": 12.0, "online": True, "os": "iOS 26"}]
+
+
 def events():
     now = time.time()
     rows = [(-3, "stick", "USB stick plugged in"), (-3, "vault", "Vault unlocked (17 passwords)"), (-2, "sync", "Sync: Up to date"), (-600, "approve", "sudo: stick accepted"),

@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QLockFile, Qt, QTimer
+from PySide6.QtCore import QEvent, QLockFile, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMenu, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QMenu, QComboBox, QDialog, QFileDia
 import jblol_pm as core
 from . import demo as demo_data
 from .logos import LogoStore
-from . import icons, model, passkeys, sysinfo, theme
+from . import icons, link, model, passkeys, sysinfo, theme
 from .desktop import DesktopMixin
 from .pages.audit import AuditPage
 from .pages.codes import CodesPage
@@ -40,6 +40,27 @@ except ImportError:
 
 PAGE_INDEX = {"locked": 0, "vault": 1, "gen": 2, "health": 3, "usb": 4, "audit": 5, "settings": 6, "codes": 7}
 NEEDS_VAULT = {"vault", "health", "codes"}
+
+
+class LinkWorker(QThread):
+    """One round with the device mailbox on the server: send an order if there is one, say "I'm here", and read who else is. Never blocks the window."""
+    done = Signal(object, str)                 # the server's listing, or an error text
+
+    def __init__(self, code, did, name, locked, order_to=""):
+        super().__init__()
+        self.code, self.did, self.name, self.locked, self.order_to = code, did, name, locked, order_to
+
+    def run(self):
+        try:
+            key = link.mac_key(core.phone_key_bytes(self.code))
+            if self.order_to:
+                core.link_request("PUT", f"/pm-link/order/{self.order_to}", link.order(key, self.order_to, self.did, self.name))
+            core.link_request("PUT", f"/pm-link/device/{self.did}", link.beacon(key, self.did, self.name, self.locked, os=sysinfo.os_name()))
+            self.done.emit(core.link_request("GET", "/pm-link"), "")
+        except core.VaultError as e:
+            self.done.emit(None, str(e))
+        except Exception as e:  # noqa: BLE001
+            self.done.emit(None, f"Link failed: {e}")
 
 
 class NavButton(QPushButton):
@@ -112,6 +133,9 @@ class Main(DesktopMixin, QMainWindow):
         self.screen_locked = False
         self.offers, self.offer_seq, self.offer_dialog = {}, 0, None
         self.lock_in_seen = 0.0
+        self.link_devs, self.link_worker, self.link_order, self.link_error = [], None, "", ""
+        self.link_id = link.device_id(sysinfo.machine_name())
+        self.link_seen_file = core.CONF_DIR / "link-seen.json"
         self.upgrading = False
         self._dev_cache = (0, [])
         self.phone_timer = QTimer(self)
@@ -156,6 +180,11 @@ class Main(DesktopMixin, QMainWindow):
         self.signals.filled.connect(lambda host, n: (self.toast(f"Browser asked for {host}: {n} login(s) offered"), self.log(f"Browser fill: {host}, {n} login(s) offered")))
         self.signals.captured.connect(self.on_capture)
         self.signals.passkey.connect(self.on_passkey)
+        self.link_timer = QTimer(self)
+        self.link_timer.timeout.connect(self.link_tick)
+        if not demo:
+            self.link_timer.start(15000)
+            QTimer.singleShot(4000, self.link_tick)
         self.periodic = QTimer(self)
         self.periodic.timeout.connect(lambda: self.start_sync())
         self.watchers = []
@@ -520,7 +549,7 @@ class Main(DesktopMixin, QMainWindow):
         logins = [e for e in entries if model.kind_of(e) == "login"]
         self.bridge_entries = logins
         self.health = core.compute_health(logins) if self.s.get("warn_passwords", True) else {}
-        if logins and self.vault and self.s["phone_enabled"] and self.s["phone_key"] and not self.demo:
+        if entries and self.vault and self.s["phone_enabled"] and self.s["phone_key"] and not self.demo:
             self.phone_timer.start(6000)
 
     def reload(self, select=None):
@@ -767,6 +796,8 @@ class Main(DesktopMixin, QMainWindow):
         self.show_page()
         self.toast(f"Opened {len(self.entries)} items", "good")
         self.request_sync(3000)
+        if self.entries and self.s["phone_enabled"] and self.s["phone_key"] and not self.demo:
+            self.phone_timer.start(8000)                       # the phone's copy is brought up to date each time the vault opens, not only after an edit
 
     def show_locked(self, title, msg, error=None):
         self.locked.set(title, msg or ("Plug in your USB stick to open it." if not self.key_now() else ""), error if isinstance(error, str) else "")
@@ -801,6 +832,64 @@ class Main(DesktopMixin, QMainWindow):
         self.lock_now()
         if not sysinfo.lock_session():
             self.toast("Couldn't lock the screen", "bad")
+
+    # ------------------------------------------------------------------ your phone (pmapp/link.py)
+    def link_phones(self):
+        if self.demo:
+            return demo_data.phones()
+        return [d for d in self.link_devs if d.get("kind") == "phone"]
+
+    def link_tick(self):
+        """Every 15 s while the phone copy is on: tell the server this computer is here and whether it's locked, see which phones are around,
+        and carry out a fresh lock order a phone sent."""
+        if self.demo or self.link_worker or not (self.s["phone_enabled"] and self.s["phone_key"]):
+            return
+        order_to, self.link_order = self.link_order, ""
+        self.link_worker = LinkWorker(self.s["phone_key"], self.link_id, sysinfo.machine_name(), self.vault is None, order_to)
+        self.link_worker.done.connect(self.link_done)
+        self.link_worker.start()
+
+    def link_done(self, listing, err):
+        if self.link_worker:
+            self.link_worker.wait()
+        self.link_worker = None
+        self.link_error = err
+        if listing is not None:
+            try:
+                key = link.mac_key(core.phone_key_bytes(self.s["phone_key"]))
+                self.link_devs = link.devices(key, listing, self.link_id)
+                try:
+                    seen = json.loads(self.link_seen_file.read_text())
+                except (OSError, ValueError):
+                    seen = []
+                orders, seen = link.orders_for(key, listing, self.link_id, seen)
+                if orders:
+                    try:
+                        self.link_seen_file.write_text(json.dumps(seen))
+                    except OSError:
+                        pass
+                    who = orders[-1].get("from_name") or "your phone"
+                    self.log(f"{who} told this computer to lock")
+                    if self.vault and not self.manual_key:
+                        self.lock_now(msg=f"{who} told this computer to lock.")
+                    sysinfo.lock_session()
+            except core.VaultError:
+                pass
+        if self.page == "usb":
+            self.usb_page.refresh()
+
+    def lock_phone(self, did, name):
+        if self.demo:
+            self.toast(f"(demo) Told {name} to lock its passwords", "good")
+            return
+        if not (self.s["phone_enabled"] and self.s["phone_key"]):
+            self.toast("Turn on the phone copy in Settings first", "warn")
+            return
+        self.link_order = did
+        self.log(f"You asked {name} to lock its passwords page")
+        self.toast(f"Told {name} to lock its passwords. It happens within a few seconds.", "good", 5000)
+        self.link_tick()
+        QTimer.singleShot(1500, self.link_tick)
 
     def pick_key(self):
         f, _ = QFileDialog.getOpenFileName(self, "Choose the key file", str(core.HOME), "Key files (*.keyx *.key);;All files (*)")
@@ -1230,7 +1319,7 @@ class Main(DesktopMixin, QMainWindow):
         self.settings_page.refresh()
 
     def send_phone(self, manual=False):
-        logins = getattr(self, "bridge_entries", [])
+        logins = getattr(self, "entries", [])
         if not self.vault or self.phone_worker or not logins or not (self.s["phone_enabled"] or manual) or not self.s["phone_key"]:
             return
         self.phone_worker = core.PhoneWorker(list(logins), self.s["phone_key"])

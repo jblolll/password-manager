@@ -389,6 +389,17 @@ class PhoneVault(unittest.TestCase):
             pm.open_phone_blob(blob, pm.new_phone_key())                      # the wrong key can't read it
         self.assertNotEqual(blob, pm.build_phone_blob(ents, code))             # a fresh nonce every time
 
+    def test_everything_goes_to_the_phone(self):
+        code = pm.new_phone_key()
+        card = {**e("Visa", "", "", "", "Cards"), "kind": "card", "data": {"number": "4111111111111111", "expiry": "12/30", "tags": ["bank"]}}
+        wifi = {**e("Home", "", "wpa-pass", "", "Wi-Fi"), "kind": "wifi", "data": {"ssid": "Home", "security": "WPA"}}
+        note = {**e("Safe code", "", "", "", "Secure notes"), "kind": "note", "notes": "1234"}
+        passkey = {**e("Key", "", "", "", "Passkeys"), "kind": "passkey", "data": {"cred": "x"}}
+        got = pm.open_phone_blob(pm.build_phone_blob([card, wifi, note, passkey, e("Bare", "u", "", "https://b.com")], code), code)
+        self.assertEqual(got["v"], 2)
+        self.assertEqual([(x["title"], x["kind"]) for x in got["entries"]], [("Visa", "card"), ("Home", "wifi"), ("Safe code", "note")])
+        self.assertEqual(got["entries"][0]["data"]["tags"], ["bank"])
+
     def test_history_markers(self):
         notes = pm.join_meta("my notes", "otpauth://totp/x?secret=ABCDEFGH", [("2026-10-17", "oldpw|with|bars"), ("2026-09-01", "older")], ("Websites", "Site"))
         self.assertEqual(pm.split_meta(notes), ("my notes", "otpauth://totp/x?secret=ABCDEFGH", [("2026-10-17", "oldpw|with|bars"), ("2026-09-01", "older")], ("Websites", "Site")))

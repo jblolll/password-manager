@@ -1,0 +1,28 @@
+{
+ "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+ "now": 1800000000,
+ "beacon": {
+  "msg": {
+   "v": 1,
+   "id": "pc-x",
+   "name": "Justin’s laptop 💻",
+   "kind": "computer",
+   "iat": 1800000000,
+   "locked": true,
+   "os": "Ubuntu 26.04"
+  },
+  "mac": "33310a5bf99344faacb7e65ce83d9b80c2c639c500b27dbe40ab6cfa7c982570"
+ },
+ "order": {
+  "msg": {
+   "v": 1,
+   "to": "ph-1",
+   "from": "pc-x",
+   "from_name": "Justin’s laptop 💻",
+   "do": "lock",
+   "iat": 1800000000,
+   "n": "f7fc5d185a4a08d7"
+  },
+  "mac": "1265e6fc39f40cef75b6df3d3ab7281808f462f707b024b67a44578da14fe098"
+ }
+}

@@ -37,6 +37,7 @@ except ImportError:                     # an old install without the new package
         GROUP_KIND = {}
         unpack = staticmethod(lambda n: (n or "", "login", {}))
         pack = staticmethod(lambda n, k, d: n or "")
+        kind_of = staticmethod(lambda e: "login")
 try:
     import presence                    # cross-device stick (presence.py, beside this file; needs python3-cryptography)
 except ImportError:
@@ -341,9 +342,16 @@ def build_phone_blob(entries, code):
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
     except ImportError:
         raise VaultError("The phone copy needs the Python 'cryptography' package: sudo apt install python3-cryptography")
-    items = [{"title": e["title"], "group": e["group"], "username": e["username"], "password": e["password"], "url": e["url"], "notes": e["notes"],
-              "otp": e.get("otp", "")} for e in entries if e["group"].split("/")[0] != PENDING_GROUP and (e["password"] or e.get("otp"))]
-    payload = json.dumps({"v": 1, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "entries": items}, separators=(",", ":")).encode()
+    items = []
+    for e in entries:
+        kind = _typed.kind_of(e)
+        if e["group"].split("/")[0] == PENDING_GROUP or kind == "passkey":
+            continue
+        if kind == "login" and not (e["password"] or e.get("otp")):
+            continue
+        items.append({"title": e["title"], "group": e["group"], "username": e["username"], "password": e["password"], "url": e["url"], "notes": e["notes"],
+                      "otp": e.get("otp", ""), "kind": kind, "data": e.get("data") or {}, "modified": e.get("modified", "")})
+    payload = json.dumps({"v": 2, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "entries": items}, separators=(",", ":")).encode()
     nonce = os.urandom(12)
     return b"PMV1" + nonce + ChaCha20Poly1305(phone_key_bytes(code)).encrypt(nonce, payload, b"PMV1")
 
@@ -369,6 +377,25 @@ def phone_request(method, body=None):
         e.close()
         raise VaultError(f"The server refused the phone copy ({e.code}).")
     except (urllib.error.URLError, OSError) as e:
+        raise VaultError(f"Couldn't reach the server ({getattr(e, 'reason', e)}).")
+
+
+def link_request(method, path, obj=None):
+    """A call to the device mailbox on the Recall server (pmapp/link.py says what travels there). Returns the JSON answer."""
+    try:
+        tok = TOKEN_FILE.read_text().strip()
+    except OSError:
+        raise VaultError("No Recall sign-in on this computer. Run setup-autosync.sh once.")
+    data = json.dumps(obj).encode() if obj is not None else None
+    req = urllib.request.Request(SERVER_URL + path, data=data, method=method,
+                                 headers={"Authorization": f"Bearer {tok}", "User-Agent": "jblol-pm/1", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        e.close()
+        raise VaultError(f"The server refused ({e.code}).")
+    except (urllib.error.URLError, OSError, ValueError) as e:
         raise VaultError(f"Couldn't reach the server ({getattr(e, 'reason', e)}).")
 
 
@@ -973,7 +1000,7 @@ class PhoneWorker(QThread):
         try:
             blob = build_phone_blob(self.entries, self.code)
             phone_request("PUT", blob)
-            self.done.emit(f"Sent {len(self.entries)} logins to the phone copy", "")
+            self.done.emit(f"Sent {len(self.entries)} items to the phone copy", "")
         except VaultError as e:
             self.done.emit("", str(e))
         except Exception as e:  # noqa: BLE001
