@@ -1,0 +1,16 @@
+__pycache__/
+*.recall-incoming
+browser-extension/pairing.json
+
+__pycache__/
+*.pyc
+*.recall-incoming
+*.recall-backup
+
+# secrets: never commit
+settings.json
+*.kdbx
+*.keyx
+*.key
+.env
+pairing.json

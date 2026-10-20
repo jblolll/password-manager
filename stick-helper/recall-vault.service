@@ -1,0 +1,8 @@
+[Unit]
+Description=Recall vault: unlock with the USB stick, lock when it is removed
+[Service]
+Environment=SSH_AUTH_SOCK=%t/gcr/ssh
+ExecStart=%h/.local/bin/recall-vault-watch
+Restart=always
+[Install]
+WantedBy=default.target

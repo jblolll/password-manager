@@ -1,0 +1,12 @@
+[Unit]
+Description=Password Manager: cross-device stick (idle unless turned on in the app)
+After=network-online.target
+
+[Service]
+Environment=SSH_AUTH_SOCK=%t/gcr/ssh
+ExecStart=/usr/bin/python3 %h/.local/share/jblol-password-manager/presence.py daemon
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

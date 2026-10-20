@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Password Manager</title>
+<style>
+ body{margin:0;width:300px;background:#0b0d12;color:#e8ebf3;font:13px system-ui,sans-serif}
+ .p{padding:14px} h1{font-size:14px;margin:0 0 4px} .m{color:#8b93a7} #st{margin:10px 0;padding:8px 10px;border-radius:8px;background:#12151c;border:1px solid #232838}
+ input[type=text],input[type=number]{width:100%;box-sizing:border-box;background:#0b0d12;color:#e8ebf3;border:1px solid #232838;border-radius:8px;padding:7px 9px;margin:4px 0 8px;font:12px ui-monospace,monospace}
+ button{background:#4d7cfe;color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer;font:600 13px system-ui}
+ button.g{background:#181c26;border:1px solid #232838;color:#e8ebf3;font-weight:400} label{display:block;margin:6px 0}
+</style>
+<div class="p"><h1>Password Manager <span class="m">jblol.systems</span></h1>
+ <div id="st" class="m">Checking…</div>
+ <button id="fill">Fill this page</button>
+ <details id="setup" style="margin-top:12px"><summary class="m" style="cursor:pointer">Pairing</summary>
+  <div class="m" style="margin-top:6px">Paste the pairing code from the app (Settings, then “Fill logins in my browser”).</div>
+  <input type="text" id="token" placeholder="pairing code" spellcheck="false" autocomplete="off">
+  <input type="number" id="port" value="47619">
+  <label><input type="checkbox" id="auto"> Fill automatically when I have one login for the site</label>
+  <button class="g" id="save">Save</button></details></div>
+<script src="popup.js"></script>
